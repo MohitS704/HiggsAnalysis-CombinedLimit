@@ -105,7 +105,7 @@ class LHCHCGBaseModel(SMLikeHiggsModel):
                 if len(self.mHRange) != 2:
                     raise RuntimeError("Higgs mass range definition requires two extrema")
                 elif float(self.mHRange[0]) >= float(self.mHRange[1]):
-                    raise RuntimeError("Extrema for Higgs mass range defined with inverterd order. Second must be larger than the first")
+                    raise RuntimeError("Extrama for Higgs mass range defined with inverterd order. Second must be larger the first")
         print("Will add bbH to signals in the following Higgs boson decay modes: %s" % (", ".join(self.add_bbH)))
 
     def dobbH(self):
@@ -402,7 +402,7 @@ class XSBRratios(LHCHCGBaseModel):
 
 
 class Kappas(LHCHCGBaseModel):
-    "assume the SM coupling but leave the Higgs mass to float"
+    "assume the SM coupling but let the Higgs mass to float"
 
     def __init__(
         self,
@@ -413,6 +413,9 @@ class Kappas(LHCHCGBaseModel):
         addWidth=False,
         addKappaC=False,
         custodial=False,
+        addOffshell=False,
+        addGammaHPOI=False,
+        kappaQFormalism=False,
     ):
         LHCHCGBaseModel.__init__(self)  # not using 'super(x,self).__init__' since I don't understand it
         self.doBRU = BRU
@@ -422,6 +425,9 @@ class Kappas(LHCHCGBaseModel):
         self.addKappaC = addKappaC
         self.addWidth = addWidth
         self.custodial = custodial
+        self.addOffshell = addOffshell
+        self.addGammaHPOI = addGammaHPOI
+        self.kappaQFormalism = kappaQFormalism
 
     def setPhysicsOptions(self, physOptions):
         self.setPhysicsOptionsBase(physOptions)
@@ -435,6 +441,27 @@ class Kappas(LHCHCGBaseModel):
                     "true",
                 ]
         print("BR uncertainties in partial widths: %s " % self.doBRU)
+
+    def getYieldScale(self, bin, process):
+        if not self.DC.isSignal[process]:
+            return 1
+
+        if self.addOffshell:
+            if process == "ttH_0PM":
+                return self.getHiggsSignalYieldScale("ttH","hzz","13TeV")
+            elif process == "crossqqH_0PM":
+                return self.getHiggsSignalYieldScale("ZH","hzz","13TeV")
+            elif process == "offggH_Q_negative":
+                return 1
+            elif("off" in process.split("_")[0]):
+                return self.getOffshellSignalYieldScale(process, "13TeV")
+            else:
+                (processSource, foundDecay, foundEnergy) = getHiggsProdDecMode(bin, process, self.options)
+                return self.getHiggsSignalYieldScale(processSource, foundDecay, foundEnergy)
+
+        else:
+            (processSource, foundDecay, foundEnergy) = getHiggsProdDecMode(bin, process, self.options)
+            return self.getHiggsSignalYieldScale(processSource, foundDecay, foundEnergy)
 
     def doParametersOfInterest(self):
         """Create POI out of signal strength and MH"""
@@ -457,18 +484,125 @@ class Kappas(LHCHCGBaseModel):
         self.modelBuilder.doVar("kappa_mu[1,0.0,5.0]")
         # self.modelBuilder.factory_("expr::kappa_mu_expr(\"@0*@1+(1-@0)*@2\", CMS_use_kmu[0], kappa_mu, kappa_tau)")
         self.modelBuilder.doVar("kappa_t[1,0.0,4.0]")
+
         if not self.resolved:
-            self.modelBuilder.doVar("kappa_g[1,0.0,2.0]")
-            self.modelBuilder.doVar("kappa_gam[1,0.0,2.5]")
+
+            # For offshell inclusion
+            if self.addOffshell:
+                self.modelBuilder.doVar("kappa_gam[1,0.0,2.5]")
+                self.modelBuilder.doVar("factor_gg[1.017199,1.017199,1.017199]")
+                self.modelBuilder.out.var("factor_gg").setConstant(True)
+                
+                factors = {
+                    "kg_t" : "[1.040,1.040,1.040]",
+                    "kg_b" : "[0.002,0.002,0.002]",
+                    "kg_c" : "[0.00002,0.00002,0.00002]",
+                    "kg_q" : "[0.979,0.979,0.979]",
+                    
+                    "kg_tb" : "[-0.038,-0.038,-0.038]",
+                    "kg_tc" : "[-0.005,-0.005,-0.005]",
+                    "kg_tq" : "[2.018,2.018,2.018]",
+                    
+                    "kg_bc" : "[0.0004,0.0004,0.0004]",
+                    "kg_bq" : "[-0.0037,-0.0037,-0.0037]",
+                    
+                    "kg_cq" : "[-0.0049,-0.0049,-0.0049]",
+                }
+                # Define factors in kappa_Q formula
+                for k, v in factors.items():
+                    self.modelBuilder.doVar(f"{k}{v}")
+                    self.modelBuilder.out.var(k).setConstant(True)
+
+                if self.kappaQFormalism:
+                    fac_str = {
+                        "kt":"@0",
+                        "kb":"@1",
+                        "kc":"@0", #kappa c = kappa t in the combination
+                        "kQ":"@2", #kappa Q appears in this one
+                        
+                        "kg_t":"@3",
+                        "kg_b":"@4",
+                        "kg_c":"@5",
+                        "kg_Q":"@6",
+                        
+                        "kg_tb":"@7",
+                        "kg_tc":"@8",
+                        "kg_tQ":"@9",
+                        
+                        "kg_bc":"@10",
+                        "kg_bQ":"@11",
+                        "kg_cQ":"@12"
+                    }
+                    
+                    self.modelBuilder.doVar("kappa_Q[0,0.0,10.0]")
+                    self.modelBuilder.factory_(
+                        "expr::kappa_g_sq(\"{kg_t}*{kt}^2 + {kg_b}*{kb}^2 + {kg_c}*{kc}^2 + {kg_Q}*{kQ}^2 + ".format(**fac_str) + 
+                        "{kg_tb}*{kt}*{kb} + {kg_tc}*{kt}*{kc} + {kg_tQ}*{kt}*{kQ} + ".format(**fac_str) + 
+                        "{kg_bc}*{kb}*{kc} + {kg_bQ}*{kb}*{kQ} + {kg_cQ}*{kc}*{kQ}".format(**fac_str) +
+                        "\", kappa_t, kappa_b, kappa_c, kappa_Q, kg_t, kg_b, kg_c, kg_q, kg_tb, kg_tc, kg_tq, kg_bc, kg_bq, kg_cq)"
+                    )
+
+                else:
+                    self.modelBuilder.doVar("kappa_g[1,0.0,2.0]")
+                    self.modelBuilder.doVar("kappa_Q_flag[1,-1,1]")
+                    self.modelBuilder.out.var("kappa_Q_flag").setConstant(True)
+
+                    fac_str = {
+                        "kt":"@0",
+                        "kb":"@1",
+                        "kc":"@0", #kappa c = kappa t in the combination
+                        "kg":"@2", #kappa g appears in this one
+                        "k_flag":"@3",
+                        
+                        "kg_t":"@4",
+                        "kg_b":"@5",
+                        "kg_c":"@6",
+                        "kg_Q":"@7",
+                        
+                        "kg_tb":"@8",
+                        "kg_tc":"@9",
+                        "kg_tQ":"@10",
+                        
+                        "kg_bc":"@11",
+                        "kg_bQ":"@12",
+                        "kg_cQ":"@13"
+                    }
+
+                    self.modelBuilder.factory_(
+                        "expr::kappa_Q(\"(" + 
+                        "(-{kg_bQ}*{kb} - {kg_cQ}*{kc} - {kg_tQ}*{kt} + {k_flag}* ".format(**fac_str) + 
+                        "sqrt(({kg_bQ}*{kb} + {kg_cQ}*{kc} + {kg_tQ}*{kt})^2 - ".format(**fac_str) + 
+                        "4*{kg_Q}*({kg_b}*{kb}^2 + {kg_bc}*{kb}*{kc} + {kg_c}*{kc}^2 - {kg}^2 + {kg_tb}*{kb}*{kt} + {kg_tc}*{kc}*{kt} + {kg_t}*{kt}^2)".format(**fac_str) + 
+                        ")/(2*{kg_Q})) \", ".format(**fac_str) + 
+                        "kappa_t, kappa_b, kappa_g, kappa_q_flag, kg_t, kg_b, kg_c, kg_Q, kg_tb, kg_tc, kg_tQ, kg_bc, kg_bQ, kg_cQ)"
+                    )
+                    
+                if self.addGammaHPOI:
+                    self.modelBuilder.doVar("GammaH_scal[1,0.05,2.5]")
+
+            else:
+                self.modelBuilder.doVar("kappa_gam[1,0.0,2.5]")
+                self.modelBuilder.doVar("kappa_g[1,0.0,2.0]")
+
         self.modelBuilder.doVar("BRinv[0,0,1]")
         self.modelBuilder.doVar("BRundet[0,0,1]")
         if not self.addInvisible:
             self.modelBuilder.out.var("BRinv").setConstant(True)
         if not self.addUndet:
             self.modelBuilder.out.var("BRundet").setConstant(True)
+
         pois = self.kappa_W + "," + self.kappa_Z + ",kappa_tau,kappa_t," + kappa_b
         if not self.resolved:
-            pois += ",kappa_g,kappa_gam"
+            if self.addOffshell:
+                if self.kappaQFormalism:
+                    pois += ",kappa_Q,kappa_gam"
+                else:
+                    pois += ",kappa_g,kappa_gam"
+
+                if self.addGammaHPOI:
+                    pois += ",GammaH_scal"
+            else:
+                pois += ",kappa_g,kappa_gam"
         if self.addInvisible:
             pois += ",BRinv"
         if self.addUndet:
@@ -509,16 +643,23 @@ class Kappas(LHCHCGBaseModel):
             self.SMH.makeScaling("hgg", Cb="kappa_b", Ctop="kappa_t", CW=self.kappa_W, Ctau="kappa_tau")
             self.SMH.makeScaling("hzg", Cb="kappa_b", Ctop="kappa_t", CW=self.kappa_W, Ctau="kappa_tau")
         else:
-            self.modelBuilder.factory_('expr::Scaling_hgluglu("@0*@0", kappa_g)')
             self.modelBuilder.factory_('expr::Scaling_hgg("@0*@0", kappa_gam)')
             if self.promote_hzg:
                 self.modelBuilder.factory_('expr::Scaling_hzg("@0*@0", kappa_Zgam)')
             else:
                 self.modelBuilder.factory_('expr::Scaling_hzg("@0*@0", kappa_gam)')
-            self.modelBuilder.factory_('expr::Scaling_ggH_7TeV("@0*@0", kappa_g)')
-            self.modelBuilder.factory_('expr::Scaling_ggH_8TeV("@0*@0", kappa_g)')
-            self.modelBuilder.factory_('expr::Scaling_ggH_13TeV("@0*@0", kappa_g)')
-            self.modelBuilder.factory_('expr::Scaling_ggH_14TeV("@0*@0", kappa_g)')
+            if( self.addOffshell )&( self.kappaQFormalism ):
+                self.modelBuilder.factory_('expr::Scaling_hgluglu("@0", kappa_g_sq)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_7TeV("@0", kappa_g_sq)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_8TeV("@0", kappa_g_sq)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_13TeV("@0", kappa_g_sq)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_14TeV("@0", kappa_g_sq)')
+            else:
+                self.modelBuilder.factory_('expr::Scaling_hgluglu("@0*@0", kappa_g)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_7TeV("@0*@0", kappa_g)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_8TeV("@0*@0", kappa_g)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_13TeV("@0*@0", kappa_g)')
+                self.modelBuilder.factory_('expr::Scaling_ggH_14TeV("@0*@0", kappa_g)')
 
         ## partial witdhs, normalized to the SM one
         kappa_mu_expr = "kappa_mu" if self.promote_hmm else "kappa_tau"
@@ -551,9 +692,15 @@ class Kappas(LHCHCGBaseModel):
 
         ## total witdh, normalized to the SM one
         if not self.addWidth:
-            self.modelBuilder.factory_(
-                'expr::c7_Gscal_tot("(@1+@2+@3+@4+@5+@6+@7)/@8/(1-@0-@9)", BRinv, c7_Gscal_Z, c7_Gscal_W, c7_Gscal_tau, c7_Gscal_top, c7_Gscal_bottom, c7_Gscal_gluon, c7_Gscal_gamma, c7_SMBRs, BRundet)'
-            )
+            if( self.addOffshell )&( self.addGammaHPOI ):
+                self.modelBuilder.factory_(
+                    'expr::c7_Gscal_tot("@0", GammaH_scal)'
+                )
+
+            else:
+                self.modelBuilder.factory_(
+                    'expr::c7_Gscal_tot("(@1+@2+@3+@4+@5+@6+@7)/@8/(1-@0-@9)", BRinv, c7_Gscal_Z, c7_Gscal_W, c7_Gscal_tau, c7_Gscal_top, c7_Gscal_bottom, c7_Gscal_gluon, c7_Gscal_gamma, c7_SMBRs, BRundet)'
+                )
 
         self.SMH.makeScaling("ggZH", CZ=self.kappa_Z, Ctop="kappa_t", Cb="kappa_b")
 
@@ -572,6 +719,27 @@ class Kappas(LHCHCGBaseModel):
         self.modelBuilder.factory_('expr::c7_BRscal_hgluglu("@0*@2/@1", Scaling_hgluglu, c7_Gscal_tot, HiggsDecayWidth_UncertaintyScaling_hgluglu)')
 
         self.modelBuilder.factory_('expr::c7_BRscal_hinv("@0", BRinv)')
+
+        if self.addOffshell:
+            # Offshell ggF SIG and INT
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_g12_13TeV("@0*@0*@1*@1*@2*@2",kappa_t,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_g11g21_negative_13TeV("-1*@0*@1*@2",kappa_t,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_g11g21_positive_13TeV("@0*@1*@2",kappa_t,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_Q_13TeV("@0*@0*@1*@1*@2*@2",kappa_Q,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_QBI_negative_13TeV("-1*@0*@1*@2",kappa_Q,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_QBI_positive_13TeV("@0*@1*@2",kappa_Q,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_Qt_negative_13TeV("-1*@0*@1*@2*@2*@3",kappa_Q,kappa_t,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offggH_Qt_positive_13TeV("@0*@1*@2*@2*@3",kappa_Q,kappa_t,kappa_Z,factor_gg)')
+            
+            # Offshell VBF signal and interference
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_ZZ_13TeV("(@0^4)*@1",kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_WW_13TeV("(@0^2)*(@1^2)*@2",kappa_W,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_ZBI_negative_13TeV("-1*(@0^2)*@1",kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_ZBI_positive_13TeV("(@0^2)*@1",kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_WBI_negative_13TeV("-1*@0*@1*@2",kappa_W,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_WBI_positive_13TeV("@0*@1*@2",kappa_W,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_ZWI_negative_13TeV("-1*@0*(@1^3)*@2",kappa_W,kappa_Z,factor_gg)')
+            self.modelBuilder.factory_('expr::c7_Offshellscal_offqqH_ZWI_positive_13TeV("@0*(@1^3)*@2",kappa_W,kappa_Z,factor_gg)')
 
     def getHiggsSignalYieldScale(self, production, decay, energy):
         name = "c7_XSBRscal_%s_%s_%s" % (production, decay, energy)
@@ -604,6 +772,16 @@ class Kappas(LHCHCGBaseModel):
             print("[LHC-HCG Kappas]", name, production, decay, energy, ": ", end=" ")
             self.modelBuilder.out.function(name).Print("")
         return name
+
+    def getOffshellSignalYieldScale(self, process, energy):
+        # On-the-fly name mapping
+        if process == "offggH_0PM": process = "offggH_g12"
+
+        name = "c7_Offshellscal_%s_%s" % (process, energy)
+        if self.modelBuilder.out.function(name) == None:
+            raise RuntimeError("No scaling function exists for offshell process %s" % process)
+        else:
+            return name
 
 
 class Lambdas(LHCHCGBaseModel):
@@ -1317,6 +1495,10 @@ K2InvC = Kappas(resolved=False, addInvisible=True, addUndet=False, addWidth=Fals
 K2InvWidth = Kappas(resolved=False, addInvisible=True, addUndet=False, addWidth=True)
 K2Undet = Kappas(resolved=False, addInvisible=True, addUndet=True)
 K2UndetWidth = Kappas(resolved=False, addInvisible=True, addUndet=True, addWidth=True)
+K2UndetOffshell_kappa_Q_formalism = Kappas(resolved=False, addInvisible=True, addUndet=True, addOffshell=True, kappaQFormalism=True)
+K2UndetOffshell_kappa_g_formalism = Kappas(resolved=False, addInvisible=True, addUndet=True, addOffshell=True, kappaQFormalism=False)
+K2OffshellGammaH_kappa_Q_formalism = Kappas(resolved=False, addOffshell=True, addGammaHPOI=True, kappaQFormalism=True)
+K2OffshellGammaH_kappa_g_formalism = Kappas(resolved=False, addOffshell=True, addGammaHPOI=True, kappaQFormalism=False)
 K3 = KappaVKappaF(floatbrinv=False)
 K3Inv = KappaVKappaF(floatbrinv=True)
 L1 = Lambdas()
